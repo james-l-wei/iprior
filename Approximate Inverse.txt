@@ -1,0 +1,47 @@
+## Approximate inverse method ##
+
+Approx.Inverse<-function(A,inv.tol){
+  
+  # Initialisation
+  n<-dim(A)[1]
+  V<-(norm(A,type="F")^-2)*A
+  tol<-10^-10
+  
+  if(inv.tol=="Exact"){
+    err<-norm(diag(n)-A%*%V,type="F")
+    
+    while(err>tol){
+      # Approximate inverse update step
+      
+      V<-0.5*V%*%(9*diag(n)-A%*%V%*%(16*diag(n)-A%*%V%*%(14*diag(n)-A%*%V%*%(6*diag(n)-A%*%V))))
+      
+      err<-norm(diag(n)-A%*%V,type="F")
+    }
+  }else{
+    for(i in 1:inv.tol){
+      V<-0.5*V%*%(9*diag(n)-A%*%V%*%(16*diag(n)-A%*%V%*%(14*diag(n)-A%*%V%*%(6*diag(n)-A%*%V))))
+    }
+  }
+  return(V)
+}
+
+# # Example data 3
+# 
+# A3<-matrix(1,100,100)
+# for(i in 1:100){
+#   for (j in 1:(i-1)){
+#     A3[i,j]<- -1
+#   }
+#   A3[i,i]<-100+i
+# }
+# tol3<-10^-10
+# 
+# start.time<-Sys.time()
+# x3<-solve(A3)
+# end.time<-Sys.time()
+# time.taken3<-end.time-start.time
+# 
+# start.time<-Sys.time()
+# x3<-Approx.Inverse(A3,tol3)
+# end.time<-Sys.time()
+# AI.time.taken3<-end.time-start.time

@@ -1,0 +1,53 @@
+library(plotly)
+
+set.seed(1234)
+
+n<-1000
+x_dot1<-runif(n,-1,1)
+x_dot2<-runif(n,0,24)
+psi<-0.1
+
+h_lambda<-function(x_i1,x_j1,x_i2,x_j2){
+  2.5*(x_i1^2+x_j1^2)-5*abs(x_i1-x_j1)+(1/480)*(x_i2^2+x_j2^2)-
+    0.05*(x_i2+x_j2+abs(x_i2-x_j2))+(52/15)
+}
+
+w<-rnorm(n,mean=0,sd=sqrt(psi))
+f<-rep(0,n)
+for(i in 1:n){
+  for(j in 1:n)
+    f[i]<-f[i]+w[j]*h_lambda(x_dot1[i],x_dot1[j],x_dot2[i],x_dot2[j])
+}
+y<-f+rnorm(n,mean=0,sd=1/sqrt(psi))
+
+Data.Ex1<-data.frame(y=y,x1=x_dot1,x2=x_dot2)
+
+# plot_ly(x=x_dot1,y=x_dot2,z=y,type="scatter3d",mode="markers")%>%
+#   layout(
+#     title="",
+#     scene=list(
+#       xaxis=list(title = "x_i1"),
+#       yaxis=list(title = "x_i2"),
+#       zaxis=list(title = "y")
+#     ))
+
+
+n<-length(y)
+m1.1<-1
+m1.2<-ceiling(n^0.1)
+m1.3<-ceiling(n^0.2)
+m1.4<-ceiling(n^0.3)
+m1.5<-ceiling(n^0.4)
+m1.6<-ceiling(n^0.5)
+m1.7<-"Exact"
+
+
+
+set.seed(1234)
+mod<-kernL(y~x1+x2,Data.Ex1,kernel="fbm",est.hurst=FALSE)
+
+start.time<-Sys.time()
+mod.fit<-acc.iprior(mod,method="em",inv.tol=m1.7)
+end.time<-Sys.time()
+summary(mod.fit)
+print(end.time-start.time)

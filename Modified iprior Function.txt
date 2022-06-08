@@ -1,0 +1,354 @@
+library(iprior)
+
+methods(iprior)
+methods(kernL)
+
+# Important functions
+
+getAnywhere(kernL.default)
+getAnywhere(iprior.default) # Modify this with acc. prefix
+getAnywhere(iprior_mixed) # Modify this
+getAnywhere(iprior_method_checker)
+getAnywhere(iprior_em_closed) # Modify this
+getAnywhere(get_Hlam)
+getAnywhere(get_Hl)
+getAnywhere(eigen_Hlam)
+getAnywhere(eigenCpp)
+getAnywhere(iprior_direct)
+
+# Ancilliary functions that must be instanced
+
+library(pacman)
+
+pack.name <- "iprior"
+
+hidden <- setdiff(p_funs(pack.name, TRUE, character.only = TRUE), p_funs(pack.name, character.only = TRUE))
+
+invisible(lapply(hidden, function(x) {
+  
+  a <- strtrim(x, 1) == "%" 
+  b <- substring(x, nchar(x)) == "%"
+  
+  if (a && b) {
+    x2 <- paste0("`", x, "`")
+  } else {
+    x2 <- x
+  }
+  
+  try(assign(x, eval(parse(text=paste(pack.name,":::",x2,sep=""))), 
+         envir = .GlobalEnv))
+}))
+
+
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+acc.iprior<-function (y, ..., kernel = "linear", method = "direct", 
+          control = list(), interactions = NULL, est.lambda = TRUE, 
+          est.hurst = FALSE, est.lengthscale = FALSE, est.offset = FALSE, 
+          est.psi = TRUE, fixed.hyp = NULL, lambda = 1, psi = 1, nystrom = FALSE, 
+          nys.seed = NULL, model = list(), train.samp, test.samp, inv.tol) 
+{
+  if (is.ipriorKernel(y)) {
+    mod <- y
+  }
+  else {
+    mod <- kernL(y = y, ..., kernel = kernel, interactions = interactions, 
+                 est.lambda = est.lambda, est.hurst = est.hurst, est.lengthscale = est.lengthscale, 
+                 est.offset = est.offset, est.psi = est.psi, fixed.hyp = fixed.hyp, 
+                 lambda = lambda, psi = psi, nystrom = nystrom, nys.seed = nys.seed, 
+                 model = model, train.samp = train.samp, test.samp = test.samp)
+  }
+  if (is.categorical(mod)) {
+    warning("Categorical responses loaded. Consider using iprobit package.", 
+            call. = FALSE)
+  }
+  method <- tolower(method)
+  method <- match.arg(method, c("direct", "em", 
+                                "fixed", "canonical", "mixed"))
+  control_ <- list(maxit = 100, em.maxit = 5, par.maxit = 5, 
+                   stop.crit = 1e-08, theta0 = NULL, silent = FALSE, report = 10, 
+                   psi.reg = FALSE, restarts = 0, no.cores = parallel::detectCores(), 
+                   optim.method = "L-BFGS", omega = 0)
+  control <- update_control(control, control_)
+  control.optim <- list(fnscale = -2, trace = ifelse(isTRUE(control$silent), 
+                                                     0, 1), maxit = max(0, control$maxit - 1), REPORT = control$report, 
+                        factr = control$stop.crit/.Machine$double.eps)
+  if (is.null(control$theta0)) {
+    theta0 <- rnorm(mod$thetal$n.theta)
+  }
+  else {
+    theta0 <- control$theta0
+    if (length(theta0) != mod$thetal$n.theta) {
+      stop(paste("Incorrect number of parameters specified. Should be", 
+                 mod$thetal$n.theta))
+    }
+  }
+  if (as.numeric(control$restarts) >= 1) {
+    res <- iprior_parallel(mod, method, control)
+    res$est.method <- paste0(gsub("\\.", "", 
+                                  res$est.method), " with random restarts.")
+  }
+  else {
+    est.method <- iprior_method_checker(mod, method)
+    if (est.method["fixed"]) {
+      res <- iprior_fixed(mod)
+      res$est.method <- "Estimation with fixed hyperparameters."
+      res$est.conv <- "Convergence not assessed."
+    }
+    else if (est.method["canonical"]) {
+      res <- iprior_canonical(mod, theta0, control.optim)
+      res$est.method <- "Efficient canonical method."
+    }
+    else {
+      if (est.method["em.closed"]) {
+        res <- acc.iprior_em_closed(mod, control$maxit, control$stop.crit, 
+                                control$silent, theta0, omega = control$omega,inv.tol=inv.tol)
+        res$est.method <- "Closed-form EM algorithm."
+      }
+      if (est.method["em.reg"]) {
+        res <- iprior_em_reg(mod, control$maxit, control$stop.crit, 
+                             control$silent, theta0)
+        res$est.method <- "Regular EM algorithm."
+      }
+      if (est.method["direct"]) {
+        res <- iprior_direct(mod, loglik_iprior, theta0, 
+                             control.optim, control$optim.method)
+        res$est.method <- "Direct optimisation method."
+      }
+      if (est.method["nystrom"]) {
+        res <- iprior_direct(mod, loglik_nystrom, theta0, 
+                             control.optim, control$optim.method)
+        res$est.method <- "Nystrom approximated optimisation."
+      }
+      if (est.method["mixed"]) {
+        res <- acc.iprior_mixed(mod, theta0, control$em.maxit, 
+                            control$stop.crit, control$silent, control.optim, 
+                            control$optim.method,inv.tol=inv.tol)
+        res$est.method <- paste0("EM algorithm (", 
+                                 control$em.maxit, " steps) + direct minimisation.")
+      }
+      if (res$conv == 0) 
+        res$est.conv <- paste0("Converged to within ", 
+                               control$stop.crit, " tolerance.")
+      else if (res$conv == 1) 
+        res$est.conv <- "Convergence criterion not met."
+      else res$est.conv <- res$message
+    }
+  }
+  res$ipriorKernel <- mod
+  res$coefficients <- reduce_theta(res$param.full, mod$estl)$theta.reduced
+  tmp <- mse_iprior(mod$y, y.hat = res$y.hat)
+  res$fitted.values <- tmp$y + get_intercept(mod)
+  names(res$fitted.values) <- attr(mod$y, "dimnames")[[1]]
+  res$residuals <- tmp$resid
+  res$train.error <- tmp$train.error
+  if (!is.null(mod$y.test) & !is.null(mod$Xl.test)) {
+    res$test <- structure(predict_iprior(res, mod$Xl.test, 
+                                         mod$y.test), class = "ipriorPredict")
+  }
+  res$method <- method
+  res$control <- control
+  res$call <- fix_call_default(match.call(), "iprior")
+  res$ipriorKernel$call <- fix_call_default(match.call(), "kernL")
+  class(res) <- "ipriorMod"
+  res
+}
+
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+acc.iprior_mixed<-function (mod, theta0 = NULL, em.maxit = 5, stop.crit = 1e-05, 
+          silent = FALSE, control.optim = list(), optim.method = "L-BFGS",inv.tol) 
+{
+  control.optim_ <- list(fnscale = -2, trace = ifelse(isTRUE(silent), 
+                                                      0, 1), maxit = 100, REPORT = 10, factr = 1e+07)
+  control.optim <- update_control(control.optim, control.optim_)
+  if (!isTRUE(silent)) 
+    cat(paste0("Running ", em.maxit, " initial EM iterations\n"))
+  start.time <- Sys.time()
+  em.method <- iprior_method_checker(mod, "em")
+  if (em.method["em.closed"]) {
+    tmp <- acc.iprior_em_closed(mod, em.maxit, stop.crit, silent, 
+                            theta0, mixed = TRUE,inv.tol=inv.tol)
+  }
+  if (em.method["em.reg"]) {
+    tmp <- iprior_em_reg(mod, em.maxit, stop.crit, silent, 
+                         theta0, mixed = TRUE)
+  }
+  if (!isTRUE(silent)) 
+    cat("Now switching to direct optimisation\n")
+  res <- iprior_direct(mod, loglik_iprior, tmp$theta, control.optim, 
+                       optim.method)
+  end.time <- Sys.time()
+  time.taken <- as.time(end.time - start.time)
+  res$time <- time.taken
+  res$start.time <- start.time
+  res$end.time <- end.time
+  res$loglik <- c(tmp$loglik, res$loglik)
+  res
+}
+
+
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+####################################################################################
+
+
+acc.iprior_em_closed<-function (mod, maxit = 500, stop.crit = 1e-05, silent = FALSE, 
+          theta0 = NULL, lambda0 = NULL, psi0 = NULL, mixed = FALSE, 
+          omega = 0, inv.tol) 
+{
+  iprior.env <- environment()
+  list2env(mod, iprior.env)
+  list2env(BlockBStuff, iprior.env)
+  environment(BlockB) <- iprior.env
+  environment(em_loop_logical) <- iprior.env
+  maxit <- max(1, maxit)
+  if (is.null(theta0)) 
+    theta0 <- rnorm(mod$thetal$n.theta)
+  psi <- theta_to_psi(theta0, mod)
+  lambda.new <- lambda <- theta_to_collapsed_param(theta0, 
+                                                   mod)[seq_len(mod$p)]
+  niter <- 0
+  loglik <- rep(NA, maxit)
+  Hl <- expand_Hl_and_lambda(Hl, rep(1, p), intr, intr.3plus)$Hl
+  if (!silent) 
+    pb <- txtProgressBar(min = 0, max = maxit, style = 1)
+  start.time <- Sys.time()
+  while (em_loop_logical()) {
+    Hlam <- get_Hlam(mod, lambda, theta.is.lambda = TRUE)
+    
+    # # Haziq's original method
+    
+    # eigen_Hlam(Hlam, iprior.env)
+    # z <- psi * u^2 + 1/psi # u^2 is vector of eigenvalues of H_lambda^2. 
+    # # z is vector of eigenvalues of Sigma_theta.
+    # zinv.Vt <- t(V)/z # V is matrix with columns being eigenvectors of H_lambda.
+    # # t(V)/z is matrix with each row corresponding to the i-th eigenvector of H_lambda divided
+    # # by the i-th eigenvalue of Sigma_theta
+    # Vy.inv.y <- as.numeric(crossprod(y, V) %*% zinv.Vt) # crossprod gives t(y)%*%V
+    # # Vy.inv.y is (1/z) * V %*% t(V) %*% y , which equals Sigma^{-1} %*% y
+    # # i.e. (1/z) * V %*% t(V) equals Sigma^{-1}
+    # # This is just the inverse based on the eigendecomposition of Sigma, where:
+    # # A:= Sigma, Q:=V, Lambda:=zI
+    
+    Sigma_theta<-psi*Hlam%*%Hlam+(1/psi)*diag(n)
+    Sigma_inverse<-Approx.Inverse(Sigma_theta,inv.tol=inv.tol)
+    
+    w <- psi * Hlam %*% Sigma_inverse%*%y
+    # w <- psi * Hlam %*% Vy.inv.y
+    
+    W <- Sigma_inverse + tcrossprod(w)
+    # W <- V %*% zinv.Vt + tcrossprod(w)
+    for (k in seq_len(p)) {
+      lambda <- expand_Hl_and_lambda(lambda[1:p], lambda[1:p], 
+                                     intr, NULL)$lambda
+      BlockB(k)
+      T1 <- sum(Psql[[k]] * W)
+      T2 <- crossprod(y, Pl[[k]]) %*% w - sum(Sl[[k]] * 
+                                                W)/2
+      lambda.new[k] <- as.numeric(T2/T1)
+    }
+    lambda <- (1 + omega) * lambda.new - omega * lambda[1:p]
+    
+    Hlamsq <- Hlam%*%Hlam
+    # Hlamsq <- V %*% (t(V) * u^2)
+    T3 <- crossprod(y) + sum(Hlamsq * W) - 2 * crossprod(y, 
+                                                         Hlam %*% w)
+    psi.new <- sqrt(max(0, as.numeric(sum(diag(W))/T3)))
+    psi <- (1 + omega) * psi.new - omega * psi
+    logdet <- sum(log(z))
+    loglik[niter + 1] <- -n/2 * log(2 * pi) - logdet/2 - 
+      crossprod(y, Vy.inv.y)/2
+    niter <- niter + 1
+    if (!silent) 
+      setTxtProgressBar(pb, niter)
+  }
+  end.time <- Sys.time()
+  time.taken <- as.time(end.time - start.time)
+  
+  # Added below line that does eigendecomposition for direct step; using this is fine
+  # as all cases involve this step; only difference is number of iterations of EM algo
+  # in previous EM part
+  # BEGINS
+  eigen_Hlam(Hlam, iprior.env)
+  z <- psi * u^2 + 1/psi
+  zinv.Vt <- t(V)/z
+  Vy.inv.y <- as.numeric(crossprod(y, V) %*% zinv.Vt)
+  w <- psi * Hlam %*% Vy.inv.y
+  W <- V %*% zinv.Vt + tcrossprod(w)
+  # ENDS
+  
+  y.hat <- get_y.hat(u, V, w)
+  if (!isTRUE(mixed)) {
+    Vy.inv <- V %*% zinv.Vt
+    dVy <- NULL
+    for (i in seq_len(p)) {
+      dVy[[i]] <- Vy.inv %*% (psi * (2 * lambda[i] * Psql[[i]] + 
+                                       Sl[[i]]))
+    }
+    dVy[[p + 1]] <- diag(1/psi, n) - (2/psi^2) * Vy.inv
+    Fi <- matrix(0, nrow = p + 1, ncol = p + 1)
+    for (i in seq_len(p + 1)) {
+      for (j in seq_len(p + 1)) {
+        Fi[i, j] <- sum(dVy[[i]] * dVy[[j]])/2
+      }
+    }
+    se <- sqrt(diag(solve(Fi)))
+  }
+  else {
+    se <- NULL
+  }
+  convergence <- niter == maxit
+  param <- kernel_to_param(kernels, lambda[1:p])
+  theta <- param_to_theta(param, estl, logpsi = log(psi))$theta
+  param.full <- theta_to_collapsed_param(theta, mod)
+  if (!silent) {
+    close(pb)
+    if (isTRUE(mixed)) 
+      cat("")
+    else if (convergence) 
+      cat("Convergence criterion not met.\n")
+    else cat("Converged after", niter, "iterations.\n")
+  }
+  list(theta = theta, param.full = param.full, se = se, loglik = as.numeric(na.omit(loglik)), 
+       w = as.numeric(w), y.hat = y.hat, niter = niter, start.time = start.time, 
+       end.time = end.time, time = time.taken, convergence = convergence, 
+       message = NULL)
+}
